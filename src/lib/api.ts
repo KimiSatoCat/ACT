@@ -75,21 +75,22 @@ export interface DialogResponse {
 export async function callDialogTurn1(
   req: DialogTurn1Request,
 ): Promise<DialogResponse> {
-  return post<DialogResponse>('/dialog/turn1', req);
+  // Firebase Cloud Functions のエクスポート名がそのままパスになる
+  return post<DialogResponse>('/dialogTurn1', req);
 }
 
 /** Turn 2 — 3択提示から選択後のフォローアップ */
 export async function callDialogTurn2(
   req: DialogTurn2Request,
 ): Promise<DialogResponse> {
-  return post<DialogResponse>('/dialog/turn2', req);
+  return post<DialogResponse>('/dialogTurn2', req);
 }
 
 /** Turn 3 — クロージング＋次ワークへの橋渡し */
 export async function callDialogTurn3(
   req: DialogTurn3Request,
 ): Promise<DialogResponse> {
-  return post<DialogResponse>('/dialog/turn3', req);
+  return post<DialogResponse>('/dialogTurn3', req);
 }
 
 // ─── レポート API ────────────────────────────────────────────────────────────
@@ -98,14 +99,14 @@ export async function callDialogTurn3(
 export async function generateWeeklyReport(
   input: WeeklyReportInput,
 ): Promise<Report> {
-  return post<Report>('/reports/weekly', input);
+  return post<Report>('/reportsWeekly', input);
 }
 
 /** 月次レポート生成 */
 export async function generateMonthlyReport(
   input: MonthlyReportInput,
 ): Promise<Report> {
-  return post<Report>('/reports/monthly', input);
+  return post<Report>('/reportsMonthly', input);
 }
 
 // ─── Firestore 同期 API ──────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ export async function generateMonthlyReport(
 export async function syncSessions(
   sessions: { id: string; workType: string; completedAt: string; durationSec: number }[],
 ): Promise<{ synced: number }> {
-  return post<{ synced: number }>('/sessions/sync', { sessions });
+  return post<{ synced: number }>('/sessionsSync', { sessions });
 }
 
 /** クライシスイベントを即時記録（重要なので専用エンドポイント） */
@@ -125,7 +126,7 @@ export async function recordCrisisEvent(event: {
   detectedAt: string;
   matchedPatterns: string[];
 }): Promise<void> {
-  await post<void>('/crisis/record', event);
+  await post<void>('/crisisRecord', event);
 }
 
 // ─── 型エクスポート ──────────────────────────────────────────────────────────
