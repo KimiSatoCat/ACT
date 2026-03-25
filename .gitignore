@@ -1,0 +1,35 @@
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# 環境変数（本番キーを含むため必ずignore）
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# macOS
+.DS_Store
+
+# iOS / Android ビルド成果物
+ios/
+android/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# TypeScript
+*.tsbuildinfo
+
+# Jest
+coverage/
