@@ -1,49 +1,75 @@
 /**
- * 認証フック
+ * 認証フック（Google Sign-In 版）
  *
- * 責務:
- *  - Firebase Auth の onAuthStateChanged を購読
- *  - uid / isAuthenticated / isLoading を useAuthStore に同期
- *  - ルーティング制御に必要な最小情報のみ公開
+ * 設計:
+ *  - Firebase Auth + Google OAuth（expo-auth-session 経由）
+ *  - Cloud Functions 不要・無料プランで動作
+ *  - 認証状態を useAuthStore に同期
  */
 
 import { useEffect } from 'react';
-import { onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { onAuthStateChanged, GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
 import { auth } from '@/lib/firebase';
 import { useAuthStore } from '@/store/useSessionStore';
 import type { AuthStore } from '@/types';
 
-/**
- * アプリ起動時に一度だけマウントして認証状態を購読する。
- * app/_layout.tsx のルートで呼び出すこと。
- */
+// Expo Go / スタンドアロン共通でセッションを閉じる
+WebBrowser.maybeCompleteAuthSession();
+
+// ─── Auth リスナー（RootLayout に一度だけマウント） ─────────────────────────
+
 export function useAuthListener(): void {
   const setAuth = useAuthStore((s: AuthStore) => s.setAuth);
   const setLoading = useAuthStore((s: AuthStore) => s.setLoading);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user: import('firebase/auth').User | null) => {
-      setAuth(user?.uid ?? null);
-      setLoading(false);
-    });
-
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (user: import('firebase/auth').User | null) => {
+        setAuth(user?.uid ?? null);
+        setLoading(false);
+      },
+    );
     return unsubscribe;
   }, [setAuth, setLoading]);
 }
 
-/**
- * 匿名サインイン（初回起動・同意後に呼び出す）
- */
-export async function signInAnon(): Promise<void> {
-  await signInAnonymously(auth);
-}
+// ─── Google Sign-In フック（認証画面内で使う） ──────────────────────────────
 
 /**
- * 認証状態セレクタ — 各画面で使用
- *
- * @example
- * const { uid, isAuthenticated, isLoading } = useAuth();
+ * Google OAuth フローを管理するフック。
+ * app/(auth)/index.tsx 内で呼び出し、promptAsync() でサインイン開始。
  */
+export function useGoogleSignIn() {
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
+    // Firebase Console → Authentication → Google → ウェブ クライアント ID
+    clientId: process.env['EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID'] ?? '',
+    androidClientId: process.env['EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID'],
+    iosClientId: process.env['EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID'],
+  });
+
+  useEffect(() => {
+    if (response?.type === 'success') {
+      const idToken = response.params['id_token'];
+      if (idToken) {
+        const credential = GoogleAuthProvider.credential(idToken);
+        signInWithCredential(auth, credential).catch((err) => {
+          console.error('[Google SignIn] credential error:', err);
+        });
+      }
+    }
+  }, [response]);
+
+  return {
+    promptAsync,
+    loading: !request,
+  };
+}
+
+// ─── 認証状態セレクタ ────────────────────────────────────────────────────────
+
 export function useAuth() {
   const uid = useAuthStore((s: AuthStore) => s.uid);
   const isAuthenticated = useAuthStore((s: AuthStore) => s.isAuthenticated);

@@ -1,54 +1,27 @@
 /**
- * Cloud Functions クライアント
+ * ACT ダイアログ API（クライアントサイド直接呼び出し）
  *
- * 設計原則:
- *  - 生テキストは一切送信しない（プライバシー設計）
- *  - カテゴリラベル・感情ラベル・回避シグナルのみ送信
- *  - Claude API (Haiku / Sonnet) は Cloud Functions 側で呼び出す
- *  - TanStack Query のキャッシュキーと組み合わせて使用
- *  - 全エンドポイントはリトライ不可（べき等でないため）
+ * 設計:
+ *  - Cloud Functions を使わず Anthropic API を直接呼ぶ
+ *  - 生テキストは送信しない（カテゴリ・感情ラベルのみ使用）
+ *  - ダイアログは 3 ターン構成
  */
 
-import { auth } from '@/lib/firebase';
-import type {
-  DialogSession,
-  Report,
-  WeeklyReportInput,
-  MonthlyReportInput,
-} from '@/types';
+import { callClaude, ACT_DIALOG_SYSTEM } from '@/lib/claudeClient';
+import type { DialogSession, Report, WeeklyReportInput, MonthlyReportInput } from '@/types';
 
-// ─── ベース URL ─────────────────────────────────────────────────────────────
+// ─── 思考カテゴリ 日本語ラベル ───────────────────────────────────────────────
 
-const BASE_URL = process.env['EXPO_PUBLIC_FUNCTIONS_BASE_URL'] ?? '';
+const CATEGORY_LABELS: Record<string, string> = {
+  self_criticism: '自己批判',
+  future_worry: '未来への不安',
+  comparison: '他者との比較',
+  rumination: '過去の後悔',
+  helplessness: '無力感',
+  rejection: '拒絶への恐れ',
+};
 
-// ─── HTTP ヘルパー ──────────────────────────────────────────────────────────
-
-async function getIdToken(): Promise<string> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
-  return user.getIdToken();
-}
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const token = await getIdToken();
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API error ${res.status}: ${text}`);
-  }
-
-  return res.json() as Promise<T>;
-}
-
-// ─── ダイアログ API ─────────────────────────────────────────────────────────
+// ─── ダイアログリクエスト型 ──────────────────────────────────────────────────
 
 export interface DialogTurn1Request {
   thoughtCategory: string;
@@ -58,7 +31,7 @@ export interface DialogTurn1Request {
 
 export interface DialogTurn2Request extends DialogTurn1Request {
   turn1Response: string;
-  userChoice: string; // Turn 2 の3択ラベル
+  userChoice: string;
 }
 
 export interface DialogTurn3Request extends DialogTurn2Request {
@@ -67,66 +40,151 @@ export interface DialogTurn3Request extends DialogTurn2Request {
 
 export interface DialogResponse {
   message: string;
-  /** サーバー側でキャッシュされたセッション ID */
   sessionId: string;
 }
 
-/** Turn 1 — 共感＋認知的距離化の問いかけ */
+// ─── Turn 1: 共感 + 認知的距離化 ────────────────────────────────────────────
+
 export async function callDialogTurn1(
   req: DialogTurn1Request,
 ): Promise<DialogResponse> {
-  // Firebase Cloud Functions のエクスポート名がそのままパスになる
-  return post<DialogResponse>('/dialogTurn1', req);
+  const categoryLabel = CATEGORY_LABELS[req.thoughtCategory] ?? req.thoughtCategory;
+  const avoidanceNote =
+    req.avoidanceSignal === 'denial'
+      ? '（ユーザーは今の気持ちを認めたくない様子です）'
+      : req.avoidanceSignal === 'erase'
+        ? '（ユーザーはこの気持ちを消し去りたいと感じています）'
+        : '';
+
+  const userMessage = `
+ユーザーの状態:
+- 思考パターン: ${categoryLabel}
+- 感情: ${req.emotionLabel}
+${avoidanceNote}
+
+ACTの脱フュージョン技法に基づいた共感的な問いかけを1文で。
+  `.trim();
+
+  const message = await callClaude(
+    'claude-haiku-4-5-20251001',
+    ACT_DIALOG_SYSTEM,
+    userMessage,
+    150,
+  );
+  const sessionId = `dialog_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return { message, sessionId };
 }
 
-/** Turn 2 — 3択提示から選択後のフォローアップ */
+// ─── Turn 2: 3択への応答 ────────────────────────────────────────────────────
+
 export async function callDialogTurn2(
   req: DialogTurn2Request,
 ): Promise<DialogResponse> {
-  return post<DialogResponse>('/dialogTurn2', req);
+  const categoryLabel = CATEGORY_LABELS[req.thoughtCategory] ?? req.thoughtCategory;
+
+  const userMessage = `
+思考パターン: ${categoryLabel} / 感情: ${req.emotionLabel}
+前のAI: ${req.turn1Response}
+ユーザーの選択: ${req.userChoice}
+
+その体験をアクセプタンスへ導く短いメッセージを1〜2文で。
+  `.trim();
+
+  const message = await callClaude(
+    'claude-haiku-4-5-20251001',
+    ACT_DIALOG_SYSTEM,
+    userMessage,
+    150,
+  );
+  return { message, sessionId: `turn2_${Date.now()}` };
 }
 
-/** Turn 3 — クロージング＋次ワークへの橋渡し */
+// ─── Turn 3: クロージング ────────────────────────────────────────────────────
+
 export async function callDialogTurn3(
   req: DialogTurn3Request,
 ): Promise<DialogResponse> {
-  return post<DialogResponse>('/dialogTurn3', req);
+  const categoryLabel = CATEGORY_LABELS[req.thoughtCategory] ?? req.thoughtCategory;
+
+  const userMessage = `
+思考パターン: ${categoryLabel} / 感情: ${req.emotionLabel}
+Turn1 AI: ${req.turn1Response} / 選択: ${req.userChoice}
+Turn2 AI: ${req.turn2Response}
+
+クロージング: 気づきを承認し、小さな励ましのメッセージを1〜2文で。
+  `.trim();
+
+  const message = await callClaude(
+    'claude-haiku-4-5-20251001',
+    ACT_DIALOG_SYSTEM,
+    userMessage,
+    150,
+  );
+  return { message, sessionId: `turn3_${Date.now()}` };
 }
 
-// ─── レポート API ────────────────────────────────────────────────────────────
+// ─── レポート生成 ────────────────────────────────────────────────────────────
 
-/** 週次レポート生成（14日以上のデータが溜まった初回から有効化） */
 export async function generateWeeklyReport(
   input: WeeklyReportInput,
 ): Promise<Report> {
-  return post<Report>('/reportsWeekly', input);
+  const { callClaude: _call, ACT_REPORT_SYSTEM } = await import('@/lib/claudeClient');
+
+  const topEmotions = input.emotion_labels
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3)
+    .map((e) => `${e.label}(${e.count}回)`)
+    .join('、');
+
+  const userMessage = `
+【7日間の練習データ】
+完了: ${input.session_count}回 / 棚: ${input.work_frequency.shelf} / ラベル: ${input.work_frequency.label} / 川: ${input.work_frequency.river}
+よく出た感情: ${topEmotions || 'なし'}
+思考パターン: ${input.thought_categories.join('、') || 'なし'}
+途中でやめた: ${input.dropout_sessions}回
+「認めたくない」: ${input.avoidance_signals.denial_responses}回 / 「消したい」: ${input.avoidance_signals.erase_responses}回
+`.trim();
+
+  const content = await _call('claude-sonnet-4-6', ACT_REPORT_SYSTEM, userMessage, 600);
+
+  return {
+    id: `report_${Date.now()}`,
+    type: 'weekly',
+    content,
+    createdAt: new Date().toISOString(),
+    periodDays: 7,
+  };
 }
 
-/** 月次レポート生成 */
 export async function generateMonthlyReport(
   input: MonthlyReportInput,
 ): Promise<Report> {
-  return post<Report>('/reportsMonthly', input);
-}
+  const { callClaude: _call, ACT_REPORT_SYSTEM } = await import('@/lib/claudeClient');
 
-// ─── Firestore 同期 API ──────────────────────────────────────────────────────
+  const topEmotions = input.emotion_labels
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5)
+    .map((e) => `${e.label}(${e.count}回)`)
+    .join('、');
 
-/**
- * 未同期セッションを Firestore にバッチ書き込みする。
- * Cloud Functions 側で UID 検証を行う。
- */
-export async function syncSessions(
-  sessions: { id: string; workType: string; completedAt: string; durationSec: number }[],
-): Promise<{ synced: number }> {
-  return post<{ synced: number }>('/sessionsSync', { sessions });
-}
+  const userMessage = `
+【${input.period_days}日間の練習データ】
+練習日数: ${input.completed_days}日 / 完了: ${input.session_count}回
+棚: ${input.work_frequency.shelf} / ラベル: ${input.work_frequency.label} / 川: ${input.work_frequency.river}
+よく出た感情: ${topEmotions || 'なし'}
+思考パターン: ${input.thought_categories.join('、') || 'なし'}
+途中でやめた: ${input.dropout_sessions}回
+`.trim();
 
-/** クライシスイベントを即時記録（重要なので専用エンドポイント） */
-export async function recordCrisisEvent(event: {
-  detectedAt: string;
-  matchedPatterns: string[];
-}): Promise<void> {
-  await post<void>('/crisisRecord', event);
+  const content = await _call('claude-sonnet-4-6', ACT_REPORT_SYSTEM, userMessage, 800);
+
+  return {
+    id: `report_${Date.now()}`,
+    type: 'monthly',
+    content,
+    createdAt: new Date().toISOString(),
+    periodDays: input.period_days,
+  };
 }
 
 // ─── 型エクスポート ──────────────────────────────────────────────────────────
